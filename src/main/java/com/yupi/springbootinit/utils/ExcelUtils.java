@@ -33,12 +33,14 @@ public class ExcelUtils {
      * @return
      */
     public static String excelToCsv(MultipartFile multipartFile) {
-        //File file = null;
-        //try {
-        //    file = ResourceUtils.getFile("classpath:网站数据.xlsx");
-        //} catch (FileNotFoundException e) {
-        //    e.printStackTrace();
-        //}
+        /*
+        测试使用
+        File file = null;
+        try {
+            file = ResourceUtils.getFile("classpath:网站数据.xlsx");
+        } catch (FileNotFoundException e) {
+            e.printStackTrace();
+        }*/
         List<Map<Integer,String>> list = null;
         try {
             list = EasyExcel.read(multipartFile.getInputStream())
@@ -65,6 +67,7 @@ public class ExcelUtils {
                 .collect(Collectors.toList());
         // 拼接表头
         result.append(StrUtil.join(",", notNullHeadData)).append("\n");
+        // 提取数据
         for (int i = 1; i < headerMap.size(); i++) {
             // 数据
             LinkedHashMap<Integer, String> dataMap = (LinkedHashMap)list.get(i);
@@ -80,7 +83,7 @@ public class ExcelUtils {
         return result.toString();
     }
 
-    public static void main(String[] args) {
-        excelToCsv(null);
-    }
+    //public static void main(String[] args) {
+    //    excelToCsv(null);
+    //}
 }
