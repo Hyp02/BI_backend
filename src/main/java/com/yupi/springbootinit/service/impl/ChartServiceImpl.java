@@ -285,6 +285,7 @@ public class ChartServiceImpl extends ServiceImpl<ChartMapper, Chart>
             if (!updateResult) {
                 this.handleCharUpdateError(chart.getId(),"更新图标成功状态失败");
                 return;
+
             }
         },threadPoolExecutor);
         BiResponse biResponse = new BiResponse();
