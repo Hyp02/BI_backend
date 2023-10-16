@@ -124,6 +124,21 @@ public class ChartController {
         return chartService.genChartByAiAsyn(multipartFile,genChartByAiRequest,request);
 
     }
+    /**
+     * 智能分析(异步)
+     *
+     * @param multipartFile
+     * @param genChartByAiRequest
+     * @param request
+     * @return
+     */
+    @PostMapping("/gen/Mq")
+    public BaseResponse<BiResponse> genChartByAiMq(@RequestPart("file") MultipartFile multipartFile,
+                                                 GenChartByAiRequest genChartByAiRequest, HttpServletRequest request) {
+
+        return chartService.genChartByAiMq(multipartFile,genChartByAiRequest,request);
+
+    }
 
     /**
      * 智能分析(同步)
