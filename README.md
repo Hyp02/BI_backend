@@ -22,14 +22,6 @@
 ![image-20231002140017345](https://gitee.com/hyp02/typora_lmage/raw/master/img/image-20231002140017345.png)
 
 ## 技术栈
-
-### 前端
-
-- React
-- Umi + Ant Design Pro
-- 可视化开发库（Echarts + HighCharts + AntV）
-- Umi openapi代码生成（自动生成后端调用代码）
-
 ### 后端
 
 - Spring Boot
