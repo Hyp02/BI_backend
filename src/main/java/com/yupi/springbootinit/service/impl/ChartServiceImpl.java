@@ -1,11 +1,11 @@
 package com.yupi.springbootinit.service.impl;
-import java.util.Date;
 
 import cn.hutool.core.io.FileUtil;
 import cn.hutool.json.JSONUtil;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import com.yupi.springbootinit.bizMq.BiProducer;
 import com.yupi.springbootinit.common.BaseResponse;
 import com.yupi.springbootinit.common.DeleteRequest;
 import com.yupi.springbootinit.common.ErrorCode;
@@ -29,7 +29,6 @@ import org.apache.commons.lang3.ObjectUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.BeanUtils;
 import org.springframework.stereotype.Service;
-import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestPart;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -39,6 +38,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ThreadPoolExecutor;
+
 
 /**
  * @author Han
@@ -57,7 +57,8 @@ public class ChartServiceImpl extends ServiceImpl<ChartMapper, Chart>
     private RedissonLimiterManager redissonLimiterManager;
     @Resource
     private ThreadPoolExecutor threadPoolExecutor;
-
+    @Resource
+    private BiProducer biProducer;
 
     /**
      * 获取查询包装类
@@ -187,6 +188,72 @@ public class ChartServiceImpl extends ServiceImpl<ChartMapper, Chart>
         return ResultUtils.success(chartPage);
     }
 
+    /**
+     * 使用Ai生成图表
+     *
+     * @param multipartFile
+     * @param genChartByAiRequest
+     * @param request
+     * @return
+     */
+    @Override
+    public BaseResponse<BiResponse> genChartByAiMq(MultipartFile multipartFile, GenChartByAiRequest genChartByAiRequest,
+                                                     HttpServletRequest request) {
+        // 是否登录
+        User loginUser = userService.getLoginUser(request);
+        ThrowUtils.throwIf(loginUser == null, ErrorCode.NOT_LOGIN_ERROR);
+        // 获取用户输入的信息
+        String name = genChartByAiRequest.getName();
+        String chartType = genChartByAiRequest.getChartType();
+        String goal = genChartByAiRequest.getGoal();
+        StringBuilder userInput = new StringBuilder();
+        // 校验并抛出异常
+        ThrowUtils.throwIf(StringUtils.isBlank(goal),
+                ErrorCode.PARAMS_ERROR,
+                "请输入要分析的目标");
+        ThrowUtils.throwIf(StringUtils.isNotBlank(name) && name.length() > 100,
+                ErrorCode.PARAMS_ERROR,
+                "名称过长");
+        // 校验上传的数据
+        long size = multipartFile.getSize();
+        final long XIAN_ZHI_SIZE = 10*1024*1024L;
+
+        ThrowUtils.throwIf(size>XIAN_ZHI_SIZE,ErrorCode.OPERATION_ERROR,
+                "文件大小超出限制");
+        String filename = multipartFile.getOriginalFilename();
+        String suffix = FileUtil.getSuffix(filename);
+        List<String> fileSupport = Arrays.asList("xlsx", "xls");
+
+        ThrowUtils.throwIf(!fileSupport.contains(suffix),ErrorCode.OPERATION_ERROR,
+                "当前系统暂不支持xlsx、xls以外类型的数据分析");
+        // 用户限流
+        redissonLimiterManager.doRateLimit("genChartByAi_"+loginUser.getId());
+        // 原始数据
+        String csvData = ExcelUtils.excelToCsv(multipartFile);
+
+        // 保存到数据库
+        Chart chart = new Chart();
+        chart.setUserId(loginUser.getId());
+        chart.setGoal(goal);
+        chart.setName(name);
+        chart.setChartData(csvData);
+        chart.setChartType(chartType);
+        chart.setStatus("wait");
+        boolean save = this.save(chart);
+        ThrowUtils.throwIf(!save, ErrorCode.OPERATION_ERROR, "图表保存失败");
+
+        // todo mq
+        biProducer.sendMessage(String.valueOf(chart.getId()));
+
+        BiResponse biResponse = new BiResponse();
+        biResponse.setChartId(chart.getId());
+
+        // todo redis优化
+        // 保存到redis中，每次保存，更新redis
+        // 返回结果
+        return ResultUtils.success(biResponse);
+    }
+
 
     /**
      * 使用Ai生成图表
@@ -253,8 +320,7 @@ public class ChartServiceImpl extends ServiceImpl<ChartMapper, Chart>
         chart.setStatus("wait");
         boolean save = this.save(chart);
         ThrowUtils.throwIf(!save, ErrorCode.OPERATION_ERROR, "图表保存失败");
-        // BI模型id
-        long BI_MODEL_ID = 1659171950288818178L;
+
         // 异步调用
         CompletableFuture.runAsync(()->{
             // 开始执行,修改数据库中的状态
@@ -266,7 +332,7 @@ public class ChartServiceImpl extends ServiceImpl<ChartMapper, Chart>
                 this.handleCharUpdateError(chart.getId(),"更新图表执行中状态失败");
             }
             // 调用AI服务
-            String resultByAi = aiManager.doChart(BI_MODEL_ID, userInput.toString());
+            String resultByAi = aiManager.doChart(CommonConstant.BI_MODEL_ID, userInput.toString());
             String[] split = resultByAi.split("【【【【【");
             if (split.length < 3) {
                 this.handleCharUpdateError(chart.getId(),"AI生成失败");
@@ -302,7 +368,8 @@ public class ChartServiceImpl extends ServiceImpl<ChartMapper, Chart>
      * @param charId
      * @param execMessage
      */
-    private void handleCharUpdateError(long charId,String execMessage){
+    @Override
+    public void handleCharUpdateError(long charId,String execMessage){
         Chart updateChartResult = new Chart();
         updateChartResult.setId(charId);
         updateChartResult.setStatus("failed");
@@ -337,8 +404,6 @@ public class ChartServiceImpl extends ServiceImpl<ChartMapper, Chart>
         User loginUser = userService.getLoginUser(request);
         // 限流判断，每个用户一个限流器
         redissonLimiterManager.doRateLimit("genChartByAi_" + loginUser.getId());
-        // BI模型id
-        long BI_MODEL_ID = 1659171950288818178L;
         // 构造用户输入
         StringBuilder userInput = new StringBuilder();
         userInput.append("分析需求：").append("\n");
@@ -354,7 +419,7 @@ public class ChartServiceImpl extends ServiceImpl<ChartMapper, Chart>
         String csvData = ExcelUtils.excelToCsv(multipartFile);
         userInput.append(csvData).append("\n");
 
-        String result = aiManager.doChart(BI_MODEL_ID, userInput.toString());
+        String result = aiManager.doChart(CommonConstant.BI_MODEL_ID, userInput.toString());
         String[] splits = result.split("【【【【【");
         if (splits.length < 3) {
             throw new BusinessException(ErrorCode.SYSTEM_ERROR, "AI 生成错误");
@@ -369,6 +434,7 @@ public class ChartServiceImpl extends ServiceImpl<ChartMapper, Chart>
         chart.setChartType(chartType);
         chart.setGenChart(genChart);
         chart.setGenResult(genResult);
+        chart.setStatus("succeed");
         chart.setUserId(loginUser.getId());
         boolean saveResult = this.save(chart);
         ThrowUtils.throwIf(!saveResult, ErrorCode.SYSTEM_ERROR, "图表保存失败");
