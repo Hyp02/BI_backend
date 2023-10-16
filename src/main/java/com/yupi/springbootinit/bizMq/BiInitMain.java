@@ -21,9 +21,10 @@ public class BiInitMain {
             Connection connection = factory.newConnection();
             Channel channel = connection.createChannel();
             // 频道绑定交换机
-            channel.exchangeDeclare(MqConstant.BI_EXCHANGE_NAME, "direct");
+            channel.exchangeDeclare(MqConstant.BI_EXCHANGE_NAME, "direct",true);
             // 创建队列
-            channel.queueDeclare(MqConstant.BI_QUEUE_NAME, false, false, false, null);
+            channel.queueDeclare(MqConstant.BI_QUEUE_NAME, true, false,
+                    false, null);
             // 绑定队列 指定路由键(绑定到对应的队列)
             channel.queueBind(MqConstant.BI_QUEUE_NAME, MqConstant.BI_EXCHANGE_NAME, MqConstant.BI_ROUTING_KEY);
         } catch (IOException e) {
