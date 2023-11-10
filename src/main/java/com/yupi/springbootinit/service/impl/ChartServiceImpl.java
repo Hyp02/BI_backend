@@ -1,5 +1,6 @@
 package com.yupi.springbootinit.service.impl;
 
+import cn.hutool.core.bean.BeanUtil;
 import cn.hutool.core.io.FileUtil;
 import cn.hutool.json.JSONUtil;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
@@ -23,21 +24,27 @@ import com.yupi.springbootinit.model.vo.BiResponse;
 import com.yupi.springbootinit.service.ChartService;
 import com.yupi.springbootinit.service.UserService;
 import com.yupi.springbootinit.utils.ExcelUtils;
+import com.yupi.springbootinit.utils.RedisConstant;
 import com.yupi.springbootinit.utils.SqlUtils;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.ObjectUtils;
 import org.apache.commons.lang3.StringUtils;
+import org.checkerframework.checker.units.qual.C;
 import org.springframework.beans.BeanUtils;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.web.bind.annotation.RequestPart;
 import org.springframework.web.multipart.MultipartFile;
 
 import javax.annotation.Resource;
 import javax.servlet.http.HttpServletRequest;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ThreadPoolExecutor;
+import java.util.stream.Collectors;
 
 
 /**
@@ -59,6 +66,8 @@ public class ChartServiceImpl extends ServiceImpl<ChartMapper, Chart>
     private ThreadPoolExecutor threadPoolExecutor;
     @Resource
     private BiProducer biProducer;
+    @Resource
+    private StringRedisTemplate stringRedisTemplate;
 
     /**
      * 获取查询包装类
@@ -100,11 +109,18 @@ public class ChartServiceImpl extends ServiceImpl<ChartMapper, Chart>
             throw new BusinessException(ErrorCode.PARAMS_ERROR);
         }
         Chart chart = new Chart();
+        // 将请求的数据赋值到chart对象中
         BeanUtils.copyProperties(chartAddRequest, chart);
         User loginUser = userService.getLoginUser(request);
         chart.setUserId(loginUser.getId());
+        // 将赋值过的chart对象保存在数据库中
         boolean result = this.save(chart);
+        // 添加到redis中
+        String key = RedisConstant.CHAT_DATA_KEY + loginUser.getId();
+        stringRedisTemplate.opsForList().rightPush(key, JSONUtil.toJsonStr(chart));
+
         ThrowUtils.throwIf(!result, ErrorCode.OPERATION_ERROR);
+
         long newChartId = chart.getId();
         return ResultUtils.success(newChartId);
     }
@@ -177,15 +193,26 @@ public class ChartServiceImpl extends ServiceImpl<ChartMapper, Chart>
         // 限制爬虫
         ThrowUtils.throwIf(size > 20, ErrorCode.PARAMS_ERROR);
         // todo 使用redis存储图表信息
-        //Page<Chart> chartPage1 = new Page<>(current, size);
-        //chartPage1.setRecords(new ArrayList<>());
-        //this.page(chartPage1, this.getQueryWrapper(chartQueryRequest))
-
-        Page<Chart> chartPage = this.page(new Page<>(current, size),
-                this.getQueryWrapper(chartQueryRequest));
-        String s = JSONUtil.toJsonStr(chartPage);
-
-        return ResultUtils.success(chartPage);
+        // 获取CHAT_DATA_KEY开头的所有key
+        Set<String> keys = stringRedisTemplate.keys(RedisConstant.CHAT_DATA_KEY + loginUser.getId());
+        List<Chart> charts = new ArrayList<>();
+        for (String key : keys) {
+            // 拿出所有数据缓存
+            charts = stringRedisTemplate.opsForList().range(key, 0, -1)
+                    .stream()
+                    .map(chartDataJson -> JSONUtil.toBean(chartDataJson, Chart.class))
+                    .collect(Collectors.toList());
+        }
+        Page<Chart> chartPage;
+        if (!charts.isEmpty()) {
+            chartPage = new Page<Chart>(current, size).setRecords(charts);
+            return ResultUtils.success(chartPage);
+        } else {
+            // 缓存未命中，查询数据库
+            chartPage = this.page(new Page<>(current, size),
+                    this.getQueryWrapper(chartQueryRequest));
+            return ResultUtils.success(chartPage);
+        }
     }
 
     /**
@@ -198,7 +225,7 @@ public class ChartServiceImpl extends ServiceImpl<ChartMapper, Chart>
      */
     @Override
     public BaseResponse<BiResponse> genChartByAiMq(MultipartFile multipartFile, GenChartByAiRequest genChartByAiRequest,
-                                                     HttpServletRequest request) {
+                                                   HttpServletRequest request) {
         // 是否登录
         User loginUser = userService.getLoginUser(request);
         ThrowUtils.throwIf(loginUser == null, ErrorCode.NOT_LOGIN_ERROR);
@@ -216,18 +243,17 @@ public class ChartServiceImpl extends ServiceImpl<ChartMapper, Chart>
                 "名称过长");
         // 校验上传的数据
         long size = multipartFile.getSize();
-        final long XIAN_ZHI_SIZE = 10*1024*1024L;
-
-        ThrowUtils.throwIf(size>XIAN_ZHI_SIZE,ErrorCode.OPERATION_ERROR,
+        final long XIAN_ZHI_SIZE = 10 * 1024 * 1024L;
+        ThrowUtils.throwIf(size > XIAN_ZHI_SIZE, ErrorCode.OPERATION_ERROR,
                 "文件大小超出限制");
         String filename = multipartFile.getOriginalFilename();
         String suffix = FileUtil.getSuffix(filename);
         List<String> fileSupport = Arrays.asList("xlsx", "xls");
 
-        ThrowUtils.throwIf(!fileSupport.contains(suffix),ErrorCode.OPERATION_ERROR,
+        ThrowUtils.throwIf(!fileSupport.contains(suffix), ErrorCode.OPERATION_ERROR,
                 "当前系统暂不支持xlsx、xls以外类型的数据分析");
         // 用户限流
-        redissonLimiterManager.doRateLimit("genChartByAi_"+loginUser.getId());
+        redissonLimiterManager.doRateLimit("genChartByAi_" + loginUser.getId());
         // 原始数据
         String csvData = ExcelUtils.excelToCsv(multipartFile);
 
@@ -248,8 +274,6 @@ public class ChartServiceImpl extends ServiceImpl<ChartMapper, Chart>
         BiResponse biResponse = new BiResponse();
         biResponse.setChartId(chart.getId());
 
-        // todo redis优化
-        // 保存到redis中，每次保存，更新redis
         // 返回结果
         return ResultUtils.success(biResponse);
     }
@@ -283,18 +307,18 @@ public class ChartServiceImpl extends ServiceImpl<ChartMapper, Chart>
                 "名称过长");
         // 校验上传的数据
         long size = multipartFile.getSize();
-        final long XIAN_ZHI_SIZE = 10*1024*1024L;
+        final long XIAN_ZHI_SIZE = 10 * 1024 * 1024L;
 
-        ThrowUtils.throwIf(size>XIAN_ZHI_SIZE,ErrorCode.OPERATION_ERROR,
+        ThrowUtils.throwIf(size > XIAN_ZHI_SIZE, ErrorCode.OPERATION_ERROR,
                 "文件大小超出限制");
         String filename = multipartFile.getOriginalFilename();
         String suffix = FileUtil.getSuffix(filename);
         List<String> fileSupport = Arrays.asList("xlsx", "xls");
 
-        ThrowUtils.throwIf(!fileSupport.contains(suffix),ErrorCode.OPERATION_ERROR,
+        ThrowUtils.throwIf(!fileSupport.contains(suffix), ErrorCode.OPERATION_ERROR,
                 "当前系统暂不支持xlsx、xls以外类型的数据分析");
         // 用户限流
-        redissonLimiterManager.doRateLimit("genChartByAi_"+loginUser.getId());
+        redissonLimiterManager.doRateLimit("genChartByAi_" + loginUser.getId());
         // 原始数据
         String csvData = ExcelUtils.excelToCsv(multipartFile);
         //分析需求：
@@ -322,20 +346,20 @@ public class ChartServiceImpl extends ServiceImpl<ChartMapper, Chart>
         ThrowUtils.throwIf(!save, ErrorCode.OPERATION_ERROR, "图表保存失败");
 
         // 异步调用
-        CompletableFuture.runAsync(()->{
+        CompletableFuture.runAsync(() -> {
             // 开始执行,修改数据库中的状态
             Chart updateChart = new Chart();
             updateChart.setId(chart.getId());
             updateChart.setStatus("running");
             boolean b = this.updateById(updateChart);
             if (!b) {
-                this.handleCharUpdateError(chart.getId(),"更新图表执行中状态失败");
+                this.handleCharUpdateError(chart.getId(), "更新图表执行中状态失败");
             }
             // 调用AI服务
             String resultByAi = aiManager.doChart(CommonConstant.BI_MODEL_ID, userInput.toString());
             String[] split = resultByAi.split("【【【【【");
             if (split.length < 3) {
-                this.handleCharUpdateError(chart.getId(),"AI生成失败");
+                this.handleCharUpdateError(chart.getId(), "AI生成失败");
             }
             // 取出Ai生成的结果
             String genChart = split[1].trim();
@@ -349,11 +373,11 @@ public class ChartServiceImpl extends ServiceImpl<ChartMapper, Chart>
             // 保存修改后的数据到数据库
             boolean updateResult = this.updateById(updateChartResult);
             if (!updateResult) {
-                this.handleCharUpdateError(chart.getId(),"更新图标成功状态失败");
+                this.handleCharUpdateError(chart.getId(), "更新图标成功状态失败");
                 return;
 
             }
-        },threadPoolExecutor);
+        }, threadPoolExecutor);
         BiResponse biResponse = new BiResponse();
 
         biResponse.setChartId(chart.getId());
@@ -365,11 +389,12 @@ public class ChartServiceImpl extends ServiceImpl<ChartMapper, Chart>
 
     /**
      * 更新状态信息处理
+     *
      * @param charId
      * @param execMessage
      */
     @Override
-    public void handleCharUpdateError(long charId,String execMessage){
+    public void handleCharUpdateError(long charId, String execMessage) {
         Chart updateChartResult = new Chart();
         updateChartResult.setId(charId);
         updateChartResult.setStatus("failed");
@@ -377,11 +402,11 @@ public class ChartServiceImpl extends ServiceImpl<ChartMapper, Chart>
         // 保存修改后的数据到数据库
         boolean updateResult = this.updateById(updateChartResult);
         if (!updateResult) {
-            log.error("更新图表状态失败_"+charId+","+execMessage);
+            log.error("更新图表状态失败_" + charId + "," + execMessage);
         }
     }
 
-   @Override
+    @Override
     public BaseResponse<BiResponse> genChartByAi(@RequestPart("file") MultipartFile multipartFile,
                                                  GenChartByAiRequest genChartByAiRequest, HttpServletRequest request) {
         String name = genChartByAiRequest.getName();
@@ -438,6 +463,10 @@ public class ChartServiceImpl extends ServiceImpl<ChartMapper, Chart>
         chart.setUserId(loginUser.getId());
         boolean saveResult = this.save(chart);
         ThrowUtils.throwIf(!saveResult, ErrorCode.SYSTEM_ERROR, "图表保存失败");
+        // todo 将生成数据添加到redis中
+        String key = RedisConstant.CHAT_DATA_KEY + loginUser.getId();
+        stringRedisTemplate.opsForList().rightPush(key,JSONUtil.toJsonStr(chart));
+
         BiResponse biResponse = new BiResponse();
         biResponse.setGenChart(genChart);
         biResponse.setGenResult(genResult);
