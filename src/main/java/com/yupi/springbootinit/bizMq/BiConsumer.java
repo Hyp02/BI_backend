@@ -1,6 +1,7 @@
 package com.yupi.springbootinit.bizMq;
 import java.util.Date;
 
+import cn.hutool.json.JSONUtil;
 import com.rabbitmq.client.Channel;
 import com.yupi.springbootinit.common.ErrorCode;
 import com.yupi.springbootinit.constant.CommonConstant;
@@ -8,12 +9,15 @@ import com.yupi.springbootinit.exception.BusinessException;
 import com.yupi.springbootinit.manager.AiManager;
 import com.yupi.springbootinit.model.entity.Chart;
 import com.yupi.springbootinit.service.ChartService;
+import com.yupi.springbootinit.service.UserService;
 import com.yupi.springbootinit.utils.ExcelUtils;
+import com.yupi.springbootinit.utils.RedisConstant;
 import lombok.SneakyThrows;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
 import org.springframework.amqp.support.AmqpHeaders;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.messaging.handler.annotation.Header;
 import org.springframework.stereotype.Component;
 
@@ -31,6 +35,8 @@ public class BiConsumer {
     private ChartService chartService;
     @Resource
     private AiManager aiManager;
+    @Resource
+    private StringRedisTemplate stringRedisTemplate;
     @SneakyThrows
     // 监听code_queue这个队列中的消息，
     @RabbitListener(queues = MqConstant.BI_QUEUE_NAME,ackMode = "MANUAL")
@@ -73,8 +79,13 @@ public class BiConsumer {
         updateChartResult.setGenChart(genChart);
         updateChartResult.setStatus("succeed");
         updateChartResult.setGenResult(fenXiResult);
+        updateChartResult.setGoal(chart.getGoal());
         // 保存修改后的数据到数据库
         boolean updateResult = chartService.updateById(updateChartResult);
+         //添加到redis中
+        Long loginUserId = chart.getUserId();
+        String key = RedisConstant.CHAT_DATA_KEY + loginUserId;
+        stringRedisTemplate.opsForList().rightPush(key, JSONUtil.toJsonStr(updateChartResult));
         if (!updateResult) {
             channel.basicNack(deliverTag,false,false);
             chartService.handleCharUpdateError(chart.getId(),"更新图标成功状态失败");
